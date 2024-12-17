@@ -1,0 +1,31 @@
+        -:    0:Source:src/main.c
+        -:    0:Graph:build/main.gcno
+        -:    0:Data:build/main.gcda
+        -:    0:Runs:1
+        -:    0:Programs:1
+        -:    1:// main.c
+        -:    2:
+        -:    3:#include "proxy.h"
+        -:    4:#include <stdio.h>
+        -:    5:#include <stdlib.h>
+        -:    6:
+        1:    7:int main(int argc, char *argv[]) {
+        1:    8:    int port = 8080; // Default port
+        -:    9:
+        1:   10:    if (argc > 1) {
+    #####:   11:        port = atoi(argv[1]);
+    #####:   12:        if (port <= 0 || port > 65535) {
+    #####:   13:            fprintf(stderr, "Invalid port number.\n");
+    #####:   14:            return EXIT_FAILURE;
+        -:   15:        }
+    #####:   16:    }
+        -:   17:
+        1:   18:    printf("Starting reverse proxy on port %d...\n", port);
+        -:   19:
+        1:   20:    if (start_proxy(port, handle_client_request) < 0) {
+        1:   21:        fprintf(stderr, "Failed to start proxy server.\n");
+        1:   22:        return EXIT_FAILURE;
+        -:   23:    }
+        -:   24:
+    #####:   25:    return EXIT_SUCCESS;
+        1:   26:}

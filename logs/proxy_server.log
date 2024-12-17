@@ -1,0 +1,3 @@
+Socket bind failed: Address already in use
+Failed to start proxy server.
+Starting reverse proxy on port 8080...

@@ -1,0 +1,221 @@
+        -:    0:Source:/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/libkern/arm/OSByteOrder.h
+        -:    0:Graph:build/route_manager.gcno
+        -:    0:Data:build/route_manager.gcda
+        -:    0:Runs:1
+        -:    0:Programs:1
+        -:    1:/*
+        -:    2: * Copyright (c) 1999-2007 Apple Inc. All rights reserved.
+        -:    3: */
+        -:    4:
+        -:    5:#ifndef _OS_OSBYTEORDERARM_H
+        -:    6:#define _OS_OSBYTEORDERARM_H
+        -:    7:
+        -:    8:#include <stdint.h>
+        -:    9:#include <arm/arch.h> /* for _ARM_ARCH_6 */
+        -:   10:
+        -:   11:/* Generic byte swapping functions. */
+        -:   12:
+        -:   13:__DARWIN_OS_INLINE
+        -:   14:uint16_t
+    #####:   15:_OSSwapInt16(
+        -:   16:	uint16_t        _data
+        -:   17:	)
+        -:   18:{
+        -:   19:	/* Reduces to 'rev16' with clang */
+    #####:   20:	return (uint16_t)(_data << 8 | _data >> 8);
+        -:   21:}
+        -:   22:
+        -:   23:__DARWIN_OS_INLINE
+        -:   24:uint32_t
+        -:   25:_OSSwapInt32(
+        -:   26:	uint32_t        _data
+        -:   27:	)
+        -:   28:{
+        -:   29:#if defined(__llvm__)
+        -:   30:	_data = __builtin_bswap32(_data);
+        -:   31:#else
+        -:   32:	/* This actually generates the best code */
+        -:   33:	_data = (((_data ^ (_data >> 16 | (_data << 16))) & 0xFF00FFFF) >> 8) ^ (_data >> 8 | _data << 24);
+        -:   34:#endif
+        -:   35:
+        -:   36:	return _data;
+        -:   37:}
+        -:   38:
+        -:   39:__DARWIN_OS_INLINE
+        -:   40:uint64_t
+        -:   41:_OSSwapInt64(
+        -:   42:	uint64_t        _data
+        -:   43:	)
+        -:   44:{
+        -:   45:#if defined(__llvm__)
+        -:   46:	return __builtin_bswap64(_data);
+        -:   47:#else
+        -:   48:	union {
+        -:   49:		uint64_t _ull;
+        -:   50:		uint32_t _ul[2];
+        -:   51:	} _u;
+        -:   52:
+        -:   53:	/* This actually generates the best code */
+        -:   54:	_u._ul[0] = (uint32_t)(_data >> 32);
+        -:   55:	_u._ul[1] = (uint32_t)(_data & 0xffffffff);
+        -:   56:	_u._ul[0] = _OSSwapInt32(_u._ul[0]);
+        -:   57:	_u._ul[1] = _OSSwapInt32(_u._ul[1]);
+        -:   58:	return _u._ull;
+        -:   59:#endif
+        -:   60:}
+        -:   61:
+        -:   62:/* Functions for byte reversed loads. */
+        -:   63:
+        -:   64:struct _OSUnalignedU16 {
+        -:   65:	volatile uint16_t __val;
+        -:   66:} __attribute__((__packed__));
+        -:   67:
+        -:   68:struct _OSUnalignedU32 {
+        -:   69:	volatile uint32_t __val;
+        -:   70:} __attribute__((__packed__));
+        -:   71:
+        -:   72:struct _OSUnalignedU64 {
+        -:   73:	volatile uint64_t __val;
+        -:   74:} __attribute__((__packed__));
+        -:   75:
+        -:   76:#if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+        -:   77:__DARWIN_OS_INLINE
+        -:   78:uint16_t
+        -:   79:_OSReadSwapInt16(
+        -:   80:	const volatile void   * _base,
+        -:   81:	uintptr_t       _offset
+        -:   82:	)
+        -:   83:{
+        -:   84:	return _OSSwapInt16(((struct _OSUnalignedU16 *)((uintptr_t)_base + _offset))->__val);
+        -:   85:}
+        -:   86:#else
+        -:   87:__DARWIN_OS_INLINE
+        -:   88:uint16_t
+        -:   89:OSReadSwapInt16(
+        -:   90:	const volatile void   * _base,
+        -:   91:	uintptr_t       _offset
+        -:   92:	)
+        -:   93:{
+        -:   94:	return _OSSwapInt16(((struct _OSUnalignedU16 *)((uintptr_t)_base + _offset))->__val);
+        -:   95:}
+        -:   96:#endif
+        -:   97:
+        -:   98:#if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+        -:   99:__DARWIN_OS_INLINE
+        -:  100:uint32_t
+        -:  101:_OSReadSwapInt32(
+        -:  102:	const volatile void   * _base,
+        -:  103:	uintptr_t       _offset
+        -:  104:	)
+        -:  105:{
+        -:  106:	return _OSSwapInt32(((struct _OSUnalignedU32 *)((uintptr_t)_base + _offset))->__val);
+        -:  107:}
+        -:  108:#else
+        -:  109:__DARWIN_OS_INLINE
+        -:  110:uint32_t
+        -:  111:OSReadSwapInt32(
+        -:  112:	const volatile void   * _base,
+        -:  113:	uintptr_t       _offset
+        -:  114:	)
+        -:  115:{
+        -:  116:	return _OSSwapInt32(((struct _OSUnalignedU32 *)((uintptr_t)_base + _offset))->__val);
+        -:  117:}
+        -:  118:#endif
+        -:  119:
+        -:  120:#if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+        -:  121:__DARWIN_OS_INLINE
+        -:  122:uint64_t
+        -:  123:_OSReadSwapInt64(
+        -:  124:	const volatile void   * _base,
+        -:  125:	uintptr_t       _offset
+        -:  126:	)
+        -:  127:{
+        -:  128:	return _OSSwapInt64(((struct _OSUnalignedU64 *)((uintptr_t)_base + _offset))->__val);
+        -:  129:}
+        -:  130:#else
+        -:  131:__DARWIN_OS_INLINE
+        -:  132:uint64_t
+        -:  133:OSReadSwapInt64(
+        -:  134:	const volatile void   * _base,
+        -:  135:	uintptr_t       _offset
+        -:  136:	)
+        -:  137:{
+        -:  138:	return _OSSwapInt64(((struct _OSUnalignedU64 *)((uintptr_t)_base + _offset))->__val);
+        -:  139:}
+        -:  140:#endif
+        -:  141:
+        -:  142:/* Functions for byte reversed stores. */
+        -:  143:
+        -:  144:#if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+        -:  145:__DARWIN_OS_INLINE
+        -:  146:void
+        -:  147:_OSWriteSwapInt16(
+        -:  148:	volatile void   * _base,
+        -:  149:	uintptr_t       _offset,
+        -:  150:	uint16_t        _data
+        -:  151:	)
+        -:  152:{
+        -:  153:	((struct _OSUnalignedU16 *)((uintptr_t)_base + _offset))->__val = _OSSwapInt16(_data);
+        -:  154:}
+        -:  155:#else
+        -:  156:__DARWIN_OS_INLINE
+        -:  157:void
+        -:  158:OSWriteSwapInt16(
+        -:  159:	volatile void   * _base,
+        -:  160:	uintptr_t       _offset,
+        -:  161:	uint16_t        _data
+        -:  162:	)
+        -:  163:{
+        -:  164:	((struct _OSUnalignedU16 *)((uintptr_t)_base + _offset))->__val = _OSSwapInt16(_data);
+        -:  165:}
+        -:  166:#endif
+        -:  167:
+        -:  168:#if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+        -:  169:__DARWIN_OS_INLINE
+        -:  170:void
+        -:  171:_OSWriteSwapInt32(
+        -:  172:	volatile void   * _base,
+        -:  173:	uintptr_t       _offset,
+        -:  174:	uint32_t        _data
+        -:  175:	)
+        -:  176:{
+        -:  177:	((struct _OSUnalignedU32 *)((uintptr_t)_base + _offset))->__val = _OSSwapInt32(_data);
+        -:  178:}
+        -:  179:#else
+        -:  180:__DARWIN_OS_INLINE
+        -:  181:void
+        -:  182:OSWriteSwapInt32(
+        -:  183:	volatile void   * _base,
+        -:  184:	uintptr_t       _offset,
+        -:  185:	uint32_t        _data
+        -:  186:	)
+        -:  187:{
+        -:  188:	((struct _OSUnalignedU32 *)((uintptr_t)_base + _offset))->__val = _OSSwapInt32(_data);
+        -:  189:}
+        -:  190:#endif
+        -:  191:
+        -:  192:#if defined(_POSIX_C_SOURCE) || defined(_XOPEN_SOURCE)
+        -:  193:__DARWIN_OS_INLINE
+        -:  194:void
+        -:  195:_OSWriteSwapInt64(
+        -:  196:	volatile void    * _base,
+        -:  197:	uintptr_t        _offset,
+        -:  198:	uint64_t         _data
+        -:  199:	)
+        -:  200:{
+        -:  201:	((struct _OSUnalignedU64 *)((uintptr_t)_base + _offset))->__val = _OSSwapInt64(_data);
+        -:  202:}
+        -:  203:#else
+        -:  204:__DARWIN_OS_INLINE
+        -:  205:void
+        -:  206:OSWriteSwapInt64(
+        -:  207:	volatile void    * _base,
+        -:  208:	uintptr_t        _offset,
+        -:  209:	uint64_t         _data
+        -:  210:	)
+        -:  211:{
+        -:  212:	((struct _OSUnalignedU64 *)((uintptr_t)_base + _offset))->__val = _OSSwapInt64(_data);
+        -:  213:}
+        -:  214:#endif
+        -:  215:
+        -:  216:#endif /* ! _OS_OSBYTEORDERARM_H */

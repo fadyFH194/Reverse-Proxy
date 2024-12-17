@@ -1,0 +1,426 @@
+        -:    0:Source:src/proxy.c
+        -:    0:Graph:build/proxy.gcno
+        -:    0:Data:build/proxy.gcda
+        -:    0:Runs:1
+        -:    0:Programs:1
+        -:    1:// proxy.c
+        -:    2:
+        -:    3:#include "proxy.h"
+        -:    4:#include "route_manager.h"
+        -:    5:#include "json_parser.h" // For JSON parsing
+        -:    6:#include <stdio.h>
+        -:    7:#include <stdlib.h>
+        -:    8:#include <string.h>
+        -:    9:#include <unistd.h>
+        -:   10:#include <arpa/inet.h>    // For sockaddr_in, htons, etc.
+        -:   11:#include <pthread.h>      // For pthread_t
+        -:   12:#include <ctype.h>
+        -:   13:#include <semaphore.h>    // For sem_t, sem_open, sem_wait, sem_post, sem_close, sem_unlink
+        -:   14:#include <fcntl.h>        // For O_CREAT, O_EXCL
+        -:   15:#include <sys/stat.h>     // For mode constants
+        -:   16:#include <signal.h>       // For signal handling
+        -:   17:#include <errno.h>
+        -:   18:#include <sys/socket.h>
+        -:   19:#include <netdb.h>
+        -:   20:#include <time.h>
+        -:   21:
+        -:   22:#define BUFFER_SIZE 8192
+        -:   23:#define MAX_CONCURRENT_CONNECTIONS 100
+        -:   24:#define SEM_NAME "/reverse_proxy_sem"
+        -:   25:#define READ_TIMEOUT 10    // Increased from 5 seconds
+        -:   26:#define WRITE_TIMEOUT 10   // Increased from 5 seconds
+        -:   27:
+        -:   28:static sem_t *connection_sem = NULL;
+        -:   29:volatile sig_atomic_t stop_server = 0;
+        -:   30:
+        -:   31:// Function Prototypes
+        -:   32:void handle_signal(int signum);
+        -:   33:static int parse_headers(const char *request, char *method, size_t method_size,
+        -:   34:                         char *path, size_t path_size, char *version, size_t version_size,
+        -:   35:                         char **headers_start);
+        -:   36:static int get_content_length(const char *headers);
+        -:   37:static const char *find_body(const char *headers);
+        -:   38:void *handle_client_request(void *arg);
+        -:   39:
+        -:   40:// Signal Handler to gracefully stop the server
+    #####:   41:void handle_signal(int signum) {
+    #####:   42:    (void)signum; // Unused parameter
+    #####:   43:    stop_server = 1;
+    #####:   44:}
+        -:   45:
+        -:   46:// Start the Proxy Server
+        2:   47:int start_proxy(int port, void *(*handler)(void *)) {
+        -:   48:    int server_socket;
+        -:   49:    struct sockaddr_in server_addr;
+        -:   50:
+        -:   51:    // Set up signal handlers for graceful shutdown
+        -:   52:    struct sigaction sa;
+        2:   53:    sa.sa_handler = handle_signal;
+        2:   54:    sa.sa_flags = 0; 
+        2:   55:    sigemptyset(&sa.sa_mask);
+        2:   56:    sigaction(SIGINT, &sa, NULL);
+        2:   57:    sigaction(SIGTERM, &sa, NULL);
+        -:   58:
+        -:   59:    // Create named semaphore to limit concurrent connections
+        2:   60:    sem_unlink(SEM_NAME);
+        2:   61:    connection_sem = sem_open(SEM_NAME, O_CREAT, 0644, MAX_CONCURRENT_CONNECTIONS);
+        2:   62:    if (connection_sem == SEM_FAILED) {
+    #####:   63:        perror("sem_open failed");
+    #####:   64:        return -1;
+        -:   65:    }
+        -:   66:
+        -:   67:    // Create server socket
+        2:   68:    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+        2:   69:    if (server_socket < 0) {
+    #####:   70:        perror("Socket creation failed");
+    #####:   71:        sem_close(connection_sem);
+    #####:   72:        sem_unlink(SEM_NAME);
+    #####:   73:        return -1;
+        -:   74:    }
+        -:   75:
+        -:   76:    // Set socket options to reuse address
+        2:   77:    int opt = 1;
+        2:   78:    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    #####:   79:        perror("setsockopt SO_REUSEADDR failed");
+    #####:   80:        close(server_socket);
+    #####:   81:        sem_close(connection_sem);
+    #####:   82:        sem_unlink(SEM_NAME);
+    #####:   83:        return -1;
+        -:   84:    }
+        -:   85:
+        -:   86:    // Bind socket to the specified port
+        2:   87:    server_addr.sin_family = AF_INET;
+        2:   88:    server_addr.sin_port = htons(port);
+        2:   89:    server_addr.sin_addr.s_addr = INADDR_ANY;
+        -:   90:
+        2:   91:    if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        2:   92:        perror("Socket bind failed");
+        2:   93:        close(server_socket);
+        2:   94:        sem_close(connection_sem);
+        2:   95:        sem_unlink(SEM_NAME);
+        2:   96:        return -1;
+        -:   97:    }
+        -:   98:
+        -:   99:    // Start listening on the socket
+    #####:  100:    if (listen(server_socket, 1024) < 0) {
+    #####:  101:        perror("Socket listen failed");
+    #####:  102:        close(server_socket);
+    #####:  103:        sem_close(connection_sem);
+    #####:  104:        sem_unlink(SEM_NAME);
+    #####:  105:        return -1;
+        -:  106:    }
+        -:  107:
+    #####:  108:    printf("Proxy server running on port %d...\n", port);
+        -:  109:
+        -:  110:    // Main accept loop
+    #####:  111:    while (!stop_server) {
+        -:  112:        struct sockaddr_in client_addr;
+    #####:  113:        socklen_t addr_len = sizeof(client_addr);
+        -:  114:
+        -:  115:        // Wait if maximum concurrent connections are reached
+    #####:  116:        if (sem_wait(connection_sem) < 0) {
+    #####:  117:            if (stop_server) break;
+    #####:  118:            perror("sem_wait failed");
+    #####:  119:            continue;
+        -:  120:        }
+        -:  121:
+        -:  122:        // Accept incoming client connection
+    #####:  123:        int *client_socket = malloc(sizeof(int));
+    #####:  124:        if (!client_socket) {
+    #####:  125:            perror("Failed to allocate memory for client_socket");
+    #####:  126:            sem_post(connection_sem);
+    #####:  127:            continue;
+        -:  128:        }
+        -:  129:
+    #####:  130:        *client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &addr_len);
+    #####:  131:        if (*client_socket < 0) {
+    #####:  132:            perror("Socket accept failed");
+    #####:  133:            free(client_socket);
+    #####:  134:            sem_post(connection_sem);
+    #####:  135:            continue;
+        -:  136:        }
+        -:  137:
+        -:  138:        // Create a detached thread to handle the client request
+        -:  139:        pthread_t thread;
+    #####:  140:        if (pthread_create(&thread, NULL, handler, client_socket) != 0) {
+    #####:  141:            perror("pthread_create failed");
+    #####:  142:            close(*client_socket);
+    #####:  143:            free(client_socket);
+    #####:  144:            sem_post(connection_sem);
+    #####:  145:            continue;
+        -:  146:        }
+    #####:  147:        pthread_detach(thread);
+        -:  148:    }
+        -:  149:
+        -:  150:    // Clean up resources
+    #####:  151:    close(server_socket);
+    #####:  152:    sem_close(connection_sem);
+    #####:  153:    sem_unlink(SEM_NAME);
+    #####:  154:    printf("Proxy server stopped.\n");
+        -:  155:
+    #####:  156:    return 0;
+        2:  157:}
+        -:  158:
+        -:  159:// Handle Client Requests with Persistent Connections
+        7:  160:void *handle_client_request(void *arg) {
+        7:  161:    int client_socket = *(int *)arg;
+        7:  162:    free(arg); 
+        -:  163:
+        -:  164:    // Set socket read and write timeouts to prevent hanging
+        -:  165:    struct timeval timeout;
+        7:  166:    timeout.tv_sec = READ_TIMEOUT;
+        7:  167:    timeout.tv_usec = 0;
+        7:  168:    if (setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+    #####:  169:        perror("setsockopt SO_RCVTIMEO failed");
+        -:  170:        // Proceed without timeout
+    #####:  171:    }
+        7:  172:    if (setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+    #####:  173:        perror("setsockopt SO_SNDTIMEO failed");
+        -:  174:        // Proceed without timeout
+    #####:  175:    }
+        -:  176:
+        -:  177:    char buffer[BUFFER_SIZE];
+        7:  178:    int keep_alive = 1; // Default to keep-alive for HTTP/1.1
+        -:  179:
+        8:  180:    while (keep_alive) {
+        8:  181:        memset(buffer, 0, BUFFER_SIZE);
+        8:  182:        int bytes_read = read(client_socket, buffer, BUFFER_SIZE - 1);
+        -:  183:
+        8:  184:        if (bytes_read < 0) {
+        1:  185:            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        -:  186:                // Timeout reached, close connection
+        1:  187:                printf("Read timeout reached. Closing connection.\n");
+        1:  188:                break;
+        -:  189:            }
+    #####:  190:            perror("Failed to read from client");
+    #####:  191:            break;
+        7:  192:        } else if (bytes_read == 0) {
+        -:  193:            // Client closed connection
+    #####:  194:            printf("Client closed the connection.\n");
+    #####:  195:            break;
+        -:  196:        }
+        -:  197:
+        7:  198:        buffer[bytes_read] = '\0';
+        -:  199:
+        -:  200:        char method[16], path[1024], version[16];
+        7:  201:        char *headers_start = NULL;
+        -:  202:
+       21:  203:        if (parse_headers(buffer, method, sizeof(method), path, sizeof(path),
+       14:  204:                         version, sizeof(version), &headers_start) < 0) {
+        1:  205:            const char *error_response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+        1:  206:            write(client_socket, error_response, strlen(error_response));
+        1:  207:            printf("Bad request received. Closing connection.\n");
+        1:  208:            break; // Close connection after bad request
+        -:  209:        }
+        -:  210:
+        -:  211:        // Determine if the connection should be kept alive
+        6:  212:        if (strcasecmp(version, "HTTP/1.1") == 0) {
+        6:  213:            keep_alive = 1; // Default in HTTP/1.1
+        6:  214:            if (strcasestr(headers_start, "Connection: close")) {
+    #####:  215:                keep_alive = 0;
+    #####:  216:            }
+        6:  217:        } else if (strcasecmp(version, "HTTP/1.0") == 0) {
+    #####:  218:            keep_alive = 0; // Default in HTTP/1.0
+    #####:  219:            if (strcasestr(headers_start, "Connection: keep-alive")) {
+    #####:  220:                keep_alive = 1;
+    #####:  221:            }
+    #####:  222:        }
+        -:  223:
+        6:  224:        printf("Received request: %s %s %s\n", method, path, version);
+        -:  225:
+        -:  226:        // Handle the /register route
+        6:  227:        if (strcasecmp(method, "POST") == 0 && strcmp(path, "/register") == 0) {
+        3:  228:            int content_length = get_content_length(headers_start ? headers_start : "");
+        3:  229:            if (content_length <= 0) {
+        1:  230:                const char *error_response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nMissing or invalid Content-Length.\r\n";
+        1:  231:                write(client_socket, error_response, strlen(error_response));
+        1:  232:                printf("Missing or invalid Content-Length. Closing connection.\n");
+        1:  233:                break; // Close connection after bad request
+        -:  234:            }
+        -:  235:
+        2:  236:            const char *body = find_body(buffer);
+        2:  237:            if (!body) {
+    #####:  238:                const char *error_response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nNo body found.\r\n";
+    #####:  239:                write(client_socket, error_response, strlen(error_response));
+    #####:  240:                printf("No body found in /register request. Closing connection.\n");
+    #####:  241:                break; // Close connection after bad request
+        -:  242:            }
+        -:  243:
+        -:  244:            char prefix[1024], host[128];
+        2:  245:            int port = 0;
+        2:  246:            if (parse_json_for_route(body, prefix, sizeof(prefix), host, sizeof(host), &port) < 0) {
+        1:  247:                const char *error_response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid JSON.\r\n";
+        1:  248:                write(client_socket, error_response, strlen(error_response));
+        1:  249:                printf("Invalid JSON in /register request. Closing connection.\n");
+        1:  250:                break; // Close connection after bad request
+        -:  251:            }
+        -:  252:
+        1:  253:            if (add_route(prefix, host, port) < 0) {
+    #####:  254:                const char *error_response = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nFailed to add route.\r\n";
+    #####:  255:                write(client_socket, error_response, strlen(error_response));
+    #####:  256:                printf("Failed to add route. Closing connection.\n");
+    #####:  257:                break; // Close connection after server error
+        -:  258:            }
+        -:  259:
+        1:  260:            const char *success_response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nRegistered.\r\n";
+        1:  261:            write(client_socket, success_response, strlen(success_response));
+        1:  262:            printf("Route registered successfully.\n");
+        1:  263:            continue; // Continue to handle next request if keep_alive is true
+        -:  264:        }
+        -:  265:
+        -:  266:        // Handle normal route forwarding
+        -:  267:        char target_host[128];
+        -:  268:        int target_port;
+        -:  269:        char matched_prefix[1024];
+        3:  270:        if (get_route(path, target_host, &target_port, matched_prefix, sizeof(matched_prefix)) < 0) {
+        3:  271:            const char *error_response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+        3:  272:            write(client_socket, error_response, strlen(error_response));
+        3:  273:            printf("No route found for path: %s. Closing connection.\n", path);
+        3:  274:            break; // Close connection after not found
+        -:  275:        }
+        -:  276:
+    #####:  277:        printf("Routing request to %s:%d with matched prefix: %s\n", target_host, target_port, matched_prefix);
+        -:  278:
+        -:  279:        // Adjust the path based on the matched prefix
+    #####:  280:        char *new_path = path + strlen(matched_prefix);
+    #####:  281:        if (*new_path == '\0') {
+    #####:  282:            new_path = "/";
+    #####:  283:        }
+        -:  284:
+        -:  285:        // Ensure that the new path starts with '/'
+    #####:  286:        if (*new_path != '/') {
+        -:  287:            char temp_path[1024];
+    #####:  288:            snprintf(temp_path, sizeof(temp_path), "/%s", new_path);
+    #####:  289:            new_path = temp_path;
+    #####:  290:        }
+        -:  291:
+        -:  292:        // Rewrite the request with the adjusted path and updated Host header
+    #####:  293:        char *host_header_start = strcasestr(headers_start, "Host:");
+        -:  294:        char modified_request[BUFFER_SIZE * 2]; // Make bigger in case we add headers
+        -:  295:
+    #####:  296:        if (!host_header_start) {
+        -:  297:            // If there's no Host header, add one along with Connection: close
+    #####:  298:            snprintf(modified_request, sizeof(modified_request),
+        -:  299:                     "%s %s %s\r\nHost: %s:%d\r\nConnection: close\r\n%s",
+        -:  300:                     method, new_path, version, target_host, target_port, headers_start);
+    #####:  301:        } else {
+        -:  302:            // Replace the existing Host header and add Connection: close
+    #####:  303:            char *end_of_line = strstr(host_header_start, "\r\n");
+    #####:  304:            if (!end_of_line) end_of_line = host_header_start + strlen(host_header_start);
+        -:  305:
+        -:  306:            // Copy request line
+        -:  307:            char request_line[2048];
+    #####:  308:            snprintf(request_line, sizeof(request_line), "%s %s %s\r\n", method, new_path, version);
+        -:  309:
+        -:  310:            // Headers after the old Host line
+    #####:  311:            char *after_host = end_of_line;
+    #####:  312:            if (after_host[0] == '\r' && after_host[1] == '\n') after_host += 2; // skip CRLF
+        -:  313:
+        -:  314:            // Rebuild the request with the new Host and Connection headers
+    #####:  315:            snprintf(modified_request, sizeof(modified_request),
+        -:  316:                     "%sHost: %s:%d\r\nConnection: close\r\n%s",
+        -:  317:                     request_line, target_host, target_port, after_host);
+        -:  318:        }
+        -:  319:
+        -:  320:        // Log the modified request being sent to the target server
+    #####:  321:        printf("Modified request to target server:\n%s", modified_request);
+        -:  322:
+        -:  323:        // Forward the modified request to the target server
+    #####:  324:        int target_socket = forward_request(target_host, target_port, modified_request);
+    #####:  325:        if (target_socket < 0) {
+    #####:  326:            const char *error_response = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n";
+    #####:  327:            write(client_socket, error_response, strlen(error_response));
+    #####:  328:            printf("Failed to forward request to target server. Closing connection.\n");
+    #####:  329:            break; // Close connection after bad gateway
+        -:  330:        }
+        -:  331:
+    #####:  332:        printf("Request forwarded to target server.\n");
+        -:  333:
+        -:  334:        // Relay the response back to the client
+    #####:  335:        while (1) {
+    #####:  336:            int bytes = read(target_socket, buffer, BUFFER_SIZE);
+    #####:  337:            if (bytes < 0) {
+    #####:  338:                perror("Failed to read from target server");
+    #####:  339:                printf("Error number: %d (%s)\n", errno, strerror(errno));
+    #####:  340:                break;
+    #####:  341:            } else if (bytes == 0) {
+        -:  342:                // Target server closed connection
+    #####:  343:                printf("Target server closed the connection.\n");
+    #####:  344:                break;
+        -:  345:            }
+        -:  346:
+    #####:  347:            int total_sent = 0;
+    #####:  348:            while (total_sent < bytes) {
+    #####:  349:                int sent = write(client_socket, buffer + total_sent, bytes - total_sent);
+    #####:  350:                if (sent < 0) {
+    #####:  351:                    perror("Failed to write to client");
+    #####:  352:                    printf("Error number: %d (%s)\n", errno, strerror(errno));
+    #####:  353:                    break;
+        -:  354:                }
+    #####:  355:                total_sent += sent;
+        -:  356:            }
+        -:  357:
+    #####:  358:            if (total_sent < bytes) {
+        -:  359:                // Failed to send all data
+    #####:  360:                printf("Failed to send all data to client.\n");
+    #####:  361:                break;
+        -:  362:            }
+        -:  363:        }
+        -:  364:
+    #####:  365:        close(target_socket);
+        -:  366:
+    #####:  367:        if (!keep_alive) {
+    #####:  368:            printf("Closing connection as per keep_alive flag.\n");
+    #####:  369:            break; // Exit the loop to close the connection
+        -:  370:        }
+        -:  371:    }
+        -:  372:
+        -:  373:    // Close client socket and release semaphore
+        7:  374:    close(client_socket);
+        7:  375:    sem_post(connection_sem);
+        7:  376:    printf("Connection closed.\n");
+        7:  377:    return NULL;
+        -:  378:}
+        -:  379:
+        -:  380:// Parse HTTP Headers
+        7:  381:static int parse_headers(const char *request, char *method, size_t method_size,
+        -:  382:                         char *path, size_t path_size, char *version, size_t version_size,
+        -:  383:                         char **headers_start)
+        -:  384:{
+        7:  385:    (void)method_size; (void)path_size; (void)version_size;
+        7:  386:    const char *end_of_line = strstr(request, "\r\n");
+        7:  387:    if (!end_of_line) return -1;
+        -:  388:
+        7:  389:    size_t line_len = end_of_line - request;
+        7:  390:    if (line_len >= BUFFER_SIZE) return -1; // Prevent buffer overflow
+        -:  391:
+        -:  392:    char first_line[2048];
+        7:  393:    if (line_len >= sizeof(first_line)) return -1;
+        7:  394:    memcpy(first_line, request, line_len);
+        7:  395:    first_line[line_len] = '\0';
+        -:  396:
+        7:  397:    if (sscanf(first_line, "%15s %1023s %15s", method, path, version) != 3) {
+        1:  398:        return -1;
+        -:  399:    }
+        -:  400:
+        6:  401:    const char *headers = end_of_line + 2; // skip \r\n
+        6:  402:    *headers_start = (char*)headers;
+        6:  403:    return 0;
+        7:  404:}
+        -:  405:
+        -:  406:// Get Content-Length from Headers
+        3:  407:static int get_content_length(const char *headers) {
+        3:  408:    const char *cl = strcasestr(headers, "Content-Length:");
+        3:  409:    if (!cl) return -1;
+        3:  410:    cl += strlen("Content-Length:");
+        6:  411:    while (*cl && isspace((unsigned char)*cl)) cl++;
+        3:  412:    int length = atoi(cl);
+        3:  413:    return length;
+        3:  414:}
+        -:  415:
+        -:  416:// Find Body in HTTP Request
+        2:  417:static const char *find_body(const char *headers) {
+        2:  418:    const char *sep = strstr(headers, "\r\n\r\n");
+        2:  419:    if (!sep) return NULL;
+        2:  420:    return sep + 4;
+        2:  421:}

@@ -1,0 +1,125 @@
+        -:    0:Source:src/route_manager.c
+        -:    0:Graph:build/route_manager.gcno
+        -:    0:Data:build/route_manager.gcda
+        -:    0:Runs:1
+        -:    0:Programs:1
+        -:    1:// route_manager.c
+        -:    2:
+        -:    3:#include "route_manager.h"
+        -:    4:#include <stdio.h>
+        -:    5:#include <stdlib.h>
+        -:    6:#include <string.h>
+        -:    7:#include <unistd.h>
+        -:    8:#include <arpa/inet.h>
+        -:    9:#include <netdb.h>
+        -:   10:#include <sys/socket.h>
+        -:   11:#include <errno.h>
+        -:   12:
+        -:   13:#define MAX_ROUTES 100
+        -:   14:#define READ_TIMEOUT 10    // Adjusted for better performance
+        -:   15:#define WRITE_TIMEOUT 10   // Adjusted for better performance
+        -:   16:
+        -:   17:static Route routes[MAX_ROUTES];
+        -:   18:static int route_count = 0;
+        -:   19:
+        -:   20:// Add a new route to the routing table
+      104:   21:int add_route(const char *prefix, const char *host, int port) {
+      104:   22:    if (route_count >= MAX_ROUTES) {
+        1:   23:        fprintf(stderr, "Route table is full.\n");
+        1:   24:        return -1;
+        -:   25:    }
+        -:   26:
+      103:   27:    strncpy(routes[route_count].prefix, prefix, sizeof(routes[route_count].prefix) - 1);
+      103:   28:    routes[route_count].prefix[sizeof(routes[route_count].prefix) - 1] = '\0';
+        -:   29:
+      103:   30:    strncpy(routes[route_count].host, host, sizeof(routes[route_count].host) - 1);
+      103:   31:    routes[route_count].host[sizeof(routes[route_count].host) - 1] = '\0';
+        -:   32:
+      103:   33:    routes[route_count].port = port;
+      103:   34:    route_count++;
+        -:   35:
+        -:   36:    // Debug output
+      103:   37:    printf("Route added: prefix=%s, host=%s, port=%d\n", prefix, host, port);
+      103:   38:    return 0;
+      104:   39:}
+        -:   40:
+        -:   41:// Retrieve the target host, port, and matched prefix based on the request path
+        5:   42:int get_route(const char *path, char *host, int *port, char *matched_prefix, size_t prefix_size) {
+        6:   43:    for (int i = 0; i < route_count; i++) {
+        2:   44:        size_t prefix_len = strlen(routes[i].prefix);
+        2:   45:        if (strncmp(path, routes[i].prefix, prefix_len) == 0) {
+        1:   46:            strncpy(host, routes[i].host, 128);
+        1:   47:            host[127] = '\0';
+        1:   48:            *port = routes[i].port;
+        1:   49:            strncpy(matched_prefix, routes[i].prefix, prefix_size - 1);
+        1:   50:            matched_prefix[prefix_size - 1] = '\0';
+        1:   51:            printf("Route found for path %s: %s:%d with prefix %s\n", path, host, *port, matched_prefix);
+        1:   52:            return 0;
+        -:   53:        }
+        1:   54:    }
+        4:   55:    printf("No route found for path %s\n", path);
+        4:   56:    return -1; // Route not found
+        5:   57:}
+        -:   58:
+        -:   59:// Forward the modified HTTP request to the target server
+7409732463018173133:   60:int forward_request(const char *host, int port, const char *request) {
+        -:   61:    int sockfd;
+        -:   62:    struct sockaddr_in server_addr;
+        -:   63:    struct hostent *server;
+        -:   64:
+        -:   65:    // Resolve host using gethostbyname
+7409732463018173133:   66:    server = gethostbyname(host);
+7409732463018173133:   67:    if (server == NULL) {
+12901679104:   68:        fprintf(stderr, "No such host: %s\n", host);
+12901679104:   69:        return -1;
+        -:   70:    }
+        -:   71:
+        -:   72:    // Create socket
+7409732450116494029:   73:    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+7409732450116494029:   74:    if (sockfd < 0) {
+5333204961826177027:   75:        perror("Socket creation failed");
+5333204961826177027:   76:        return -1;
+        -:   77:    }
+        -:   78:
+        -:   79:    // Set socket timeouts to prevent hanging
+        -:   80:    struct timeval timeout;
+5703806661766880560:   81:    timeout.tv_sec = READ_TIMEOUT;
+5703806661766880560:   82:    timeout.tv_usec = 0;
+5703806661766880560:   83:    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+1444879660:   84:        perror("setsockopt SO_RCVTIMEO failed");
+        -:   85:        // Proceed without timeout
+1444879660:   86:    }
+5703806661766880560:   87:    if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+12901679104:   88:        perror("setsockopt SO_SNDTIMEO failed");
+        -:   89:        // Proceed without timeout
+12901679104:   90:    }
+        -:   91:
+        -:   92:    // Prepare server address
+5703806661766880560:   93:    memset(&server_addr, 0, sizeof(server_addr));
+5703806661766880560:   94:    server_addr.sin_family = AF_INET;
+5703806661766880560:   95:    server_addr.sin_port = htons(port);
+5703806661766880560:   96:    memcpy(&server_addr.sin_addr.s_addr, server->h_addr, server->h_length);
+        -:   97:
+        -:   98:    // Connect to target server
+5703806661766880560:   99:    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    #####:  100:        perror("Connect to target server failed");
+    #####:  101:        close(sockfd);
+    #####:  102:        return -1;
+        -:  103:    }
+        -:  104:
+        -:  105:    // Send request to target server
+5703806661766880560:  106:    size_t total_sent = 0;
+5703806661766880560:  107:    size_t request_len = strlen(request);
+5703806661766880560:  108:    while (total_sent < request_len) {
+    #####:  109:        ssize_t sent = send(sockfd, request + total_sent, request_len - total_sent, 0);
+    #####:  110:        if (sent < 0) {
+    #####:  111:            perror("Failed to send to target server");
+    #####:  112:            close(sockfd);
+    #####:  113:            return -1;
+        -:  114:        }
+    #####:  115:        total_sent += sent;
+        -:  116:    }
+        -:  117:
+5703806661766880560:  118:    printf("Request forwarded to target server at %s:%d\n", host, port);
+5703806661766880560:  119:    return sockfd; // Return the socket to read the response
+11037011636494736691:  120:}
